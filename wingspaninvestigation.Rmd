@@ -1,0 +1,465 @@
+---
+output: 
+  html_document: 
+    fig_width: 8
+---
+Making Sense of NBA Wingspan Data by Matt Ignal
+========================================================
+
+# Introduction
+
+Prospect projections in basketball have always interested me, but given how often length and wingspan are referenced in scouting reports, I was surprised to find how little public work there is available making sense of wingspans and how this should factor into projections. It makes good basketball sense that having a longer wingspan should improve a player's defensive ability and potential, since long arms are useful for clogging up passing lanes and protecting the rim, but can wingspan data improve upon box-score metrics (steals, blocks, fouls) to estimate a player's defensive contributions?
+
+*The dataset presented here is taken from series of datasets I scraped and compiled from RealGM, Basketball Reference, and DraftExpress.* The data contains only players who entered the NBA in 2003 or later. In order to simplify things for the purpose of this project, I removed 50+ columns from the data, leaving mainly defensive-oriented variables.
+
+Box Plus/Minus is a box-score metric whose basis is a 14-year "RAPM" sample, a plus/minus-oriented (i.e. how does the team perform when a player is on the court?) metric. The basic idea is that a player's box score could predict that player's RAPM. This investigation will focus specifically on Defensive Box Plus/Minus, which is calculated simply by subtracting Offensive Box Plus/Minus (OBPM, also captured by box score) from overall Box Plus/Minus. A more detailed description can be found on [Basketball Reference](http://www.basketball-reference.com/about/bpm.html). As they caution:
+
+> "Box Plus/Minus is good at measuring offense and solid overall, but the defensive numbers in particular should not be considered definitive. Look at the defensive values as a guide, but don't hesitate to discount them when a player is well known as a good or bad defender." 
+
+To date, there is no definitive metric for capturing defensive value, so despite this warning, Box Plus/Minus is a worthy attempt to capture a player's value. Some of its strengths as a metric include its availability throughout NBA history, and it generally has less year-to-year variance for players than other "advanced" metrics. 
+
+Wingspan data is much less complete, but is fairly well-catalogued in the 2000s and 2010s on DraftExpress' pre-draft measurement database. The highest measured wingspan was taken because many of these measurements occur while a player is still growing. However, the highest measurement obviously isn't guaranteed to be the most recent or accurate one, yet it should be enough to explore the theory is that having a longer wingspan should lead to better defense. This will be the central focus of the investigation.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, packages}
+# Load all of the packages that you end up using
+# in your analysis in this code chunk.
+
+# Notice that the parameter "echo" was set to FALSE for this code chunk.
+# This prevents the code from displaying in the knitted HTML output.
+# You should set echo=FALSE for all code chunks in your file.
+
+library(ggplot2)
+library(RColorBrewer)
+library(ggrepel)
+library(memisc)
+library(plotly)
+```
+
+```{r echo=FALSE, Load_the_Data}
+# Load the Data
+df <- read.csv('basketball4.csv')
+# Subsetting into NBA
+NBA_raw <- df[which(df$Lg == 'NBA'), ]
+# Subsetting into significant minutes
+NBA <- NBA_raw[which(NBA_raw$MP >= 400), ]
+# Subsetting into positions
+positions <- c("B", "S", "W", "G")
+Bigs <- NBA[which(NBA$Position=='B'), ]
+Swings <- NBA[which(NBA$Position=='S'), ]
+Wings <- NBA[which(NBA$Position=='W'), ]
+Guards <- NBA[which(NBA$Position=='G'), ]
+# Subsetting into rookie years helps create a single row for each player
+rooks <- NBA_raw[which(NBA_raw$YFD == 1), ]
+# Functions for Wingspan minus Height and Wingspan divided by Height
+rooks$WingspandivnHt <- (rooks$Wingspan / rooks$Ht)
+rooks$WingspanminHt <- (rooks$Wingspan - rooks$Ht)
+NBA$WingspandivHt <- (NBA$Wingspan / NBA$Ht)
+NBA$WingspanminHt <- (NBA$Wingspan - NBA$Ht)
+# Turn warnings off
+options(warn=-1)
+```
+
+# Univariate Plots Section
+
+```{r echo=FALSE, Univariate_Plots}
+summary(df)
+
+dim(df)
+```
+
+We have 17 variables containing 8185 observations (player-seasons) in the raw NBA data. The dataset contains players who entered the NBA in 2003 or later.
+
+```{r echo=FALSE}
+ggplot(NBA_raw, aes(Wingspan)) +
+  geom_histogram(binwidth = 0.5, color = 'black', fill = '#F79420') +
+  scale_x_continuous(limits = c(70, 94), breaks = seq(70, 94, 2))
+
+summary(NBA_raw$Wingspan)
+```
+
+The median wingspan is 82.75 inches, while the maximum is 92.75 inches.
+
+```{r echo=FALSE}
+ggplot(NBA_raw, aes(Ht)) +
+  geom_histogram(binwidth = 0.5, color = 'black', fill = 'blue') +
+  scale_x_continuous(limits = c(68, 90), breaks = seq(68, 90, 2))
+
+summary(NBA_raw$Ht)
+```
+
+The median height is 79.00 inches.
+
+```{r echo=FALSE}
+ggplot(NBA, aes(DBPM)) +
+  geom_histogram(binwidth = 0.25, color = 'black', fill = 'red') +
+    scale_x_continuous(limits = c(-5, 8), breaks = seq(-5, 8, 1))
+
+summary(NBA$DBPM)
+```
+
+Most DPBMs fall within -3 and 2. There's only one outlier after accounting for minutes played, but it's a legitimate data point.
+
+```{r echo=FALSE}
+ggplot(NBA, aes(OBPM)) +
+  geom_histogram(binwidth = 0.25, color = 'black', fill = '#F79420') +
+    scale_x_continuous(limits = c(-5, 8), breaks = seq(-5, 8, 1))
+```
+
+Most OBPMs fall below 0, and very few reach "elite" territory (+4 or more).
+
+```{r echo=FALSE}
+ggplot(NBA, aes(PF)) +
+  geom_histogram(binwidth = 0.25, color = 'black', fill = 'red')
+  
+ggplot(NBA, aes(BLK)) +
+  geom_histogram(binwidth = 0.25, color = 'black', fill = 'blue') 
+
+ggplot(NBA, aes(STL)) +
+  geom_histogram(binwidth = 0.25, color = 'black', fill = '#F79420')
+
+ggplot(NBA, aes(DRB)) +
+  geom_histogram(binwidth = 0.25, color = 'black', fill = 'green')
+```
+
+The player fouls, defensive rebounds, and blocks per 100 possessions were right-skewed so we will use a log transform. It makes sense that most players would get few blocks, rebounds and fouls but a small percentage would get many.
+
+```{r echo=FALSE}
+ggplot(NBA, aes(log(PF))) +
+  geom_histogram(binwidth = 0.1, color = 'black', fill = 'red')
+  
+ggplot(NBA, aes(log(BLK))) +
+  geom_histogram(binwidth = 0.3, color = 'black', fill = 'blue')
+
+ggplot(NBA, aes(log(DRB))) +
+  geom_histogram(binwidth = 0.05, color = 'black', fill = 'green')
+```
+
+Log transformations of the three variables in question show normal distributions.
+
+```{r echo=FALSE}
+ggplot(NBA, aes(WingspandivHt)) +
+  geom_histogram(binwidth = .01) +
+  labs(x = "Wingspan:Height")
+
+ggplot(NBA, aes(WingspanminHt)) +
+  geom_histogram(binwidth = 0.5) +
+  labs(x = "Wingspan - Height")
+```
+
+Most player's have a slightly longer wingspan than their listed height, but I was surpised at the amount of variance. This might be worth looking at in more detail.
+
+# Univariate Analysis
+
+### What is the structure of your dataset?
+
+We have 16 variables containing 8185 observations (player-seasons) in the raw NBA data. The dataset contains players who entered the NBA in 2003 or later.
+
+Other observations:
+* DBPM mean is about 0 when controlling for minutes played.
+* Most players get few steals and blocks, but a small percentage get many more than others.
+* The average NBA player's height is about 79 inches. Wingspans are generally longer, and the average is about 82.5 inches.
+
+### What is/are the main feature(s) of interest in your dataset?
+
+The main features of interest are Wingspan and Height. Can we use defensive statistics along with these variables to predict a player's defensive value, measured by DBPM?
+
+### What other features in the dataset do you think will help support your investigation into your feature(s) of interest?
+
+Defensive statistics like fouls, steals, and blocks per 100 possessions should help to create a model to predict a player's defensive value.
+
+### Did you create any new variables from existing variables in the dataset?
+
+Yes, I created Wingspan minus Height and Wingspan divided by Height. Perhaps the ratio or difference between Wingspan and Height will also play a role.
+
+### Of the features you investigated, were there any unusual distributions? Did you perform any operations on the data to tidy, adjust, or change the form of the data? If so, why did you do this?
+
+Most distributions were normal, but defensive rebounds, blocks, and fouls per 100 possession clearly right-skewed. They display more normal distributions when log-transformed.
+
+# Bivariate Plots Section
+
+```{r echo=FALSE, Bivariate_Plots}
+ggplot(NBA, aes(Wingspan, Ht)) +
+  geom_point() +
+  geom_smooth()
+
+ggplot(NBA, aes(Wingspan, DBPM)) +
+  geom_boxplot(aes(group = cut_width(Wingspan, 1))) +
+  geom_smooth()
+
+cor(NBA$DBPM, NBA$Wingspan, use="complete")
+
+ggplot(NBA, aes(Wingspan, OBPM)) +
+  geom_boxplot(aes(group = cut_width(Wingspan, 1))) +
+  geom_smooth()
+
+cor(NBA$OBPM, NBA$Wingspan, use="complete")
+```
+
+The relationship between wingspan and DBPM appears linear, particularly for the bulk of the points. As expected, the relationship between wingspan and offense (measured via OBPM) is far weaker.
+The correlation between DBPM and wingspan is 0.53.
+
+```{r echo=FALSE}
+ggplot(NBA, aes(Ht, DBPM)) +
+  geom_boxplot(aes(group = cut_width(Ht, 1))) +
+  geom_smooth()
+
+cor(NBA$DBPM, NBA$Ht, use="complete")
+```
+
+The correlation between DBPM and height is 0.47.
+
+Again, the relationship between height and DBPM appears linear. It's difficult to say whether this is true for "actual defensive value," but it's clear DPBM favors taller and longer players.
+
+Let's organize by position. Perhaps while it's better to have a larger wingspan, it's especially good to have a large wingspan for one's position. I had a friend go through the dataset to label positions according to modern standards, which are generally more fluid than traditional PG/SG/SF/PF/C. Guards generally defend PG/SG, Wings SG/SF, Swings  SF/PF, and bigs PF/C. If my theory is true, the trendlines should have a roughly positive exponential curves.
+
+```{r echo=FALSE}
+ggplot(NBA, aes(Wingspan, DBPM)) +
+  geom_point() +
+  geom_smooth() +
+  facet_wrap(~Position)
+
+ggplot(Guards, aes(Wingspan, DBPM)) +
+  geom_point(size = 2) +
+  geom_smooth(se = FALSE) +
+  labs(title = "Guards")
+
+ggplot(Wings, aes(Wingspan, DBPM)) +
+  geom_point(size = 2) +
+  geom_smooth(se = FALSE) +
+  labs(title = "Wings")
+
+ggplot(Swings, aes(Wingspan, DBPM)) +
+  geom_point(size = 2) +
+  geom_smooth(se = FALSE) +
+  labs(title = "Swings")
+
+ggplot(Bigs, aes(Wingspan, DBPM)) +
+  geom_point(size = 2) +
+  geom_smooth(se = FALSE) +
+  labs(title = "Bigs")
+```
+
+Unfortunately for my theory, the pattern of these trendlines are more linear than exponential. 
+
+```{r echo=FALSE}
+ggplot(NBA, aes(DBPM, color = Position)) +
+  geom_density(size = .75) +
+  scale_colour_brewer(palette = "Blues", limit = positions, direction = -1) +
+  theme_dark()
+```
+
+The shapes of the density curves for all positions are all broadly similar, with larger players.
+
+Let's look at height versus wingspan. Perhaps it is good for a player's defense if they have "outsized" wingspans, or wingspans much larger than their heights would suggest. That way the player could have the wingspan of a larger player with a quickness of a smaller one.
+
+```{r echo=FALSE}
+ggplot(data = NBA, aes(WingspanminHt, DBPM)) +
+  geom_point() +
+  geom_smooth(method = lm, se = FALSE)
+
+cor(NBA$DBPM, NBA$WingspanminHt, use="complete")
+
+ggplot(data = NBA, aes(WingspandivHt, DBPM)) +
+  geom_point() +
+  geom_smooth(method = lm, se = FALSE)
+```
+
+The correlation for wingspan - height with DBPM is 0.25, whereas the correlation for wingspan / height with DBPM is 0.22.
+
+```{r echo=FALSE}
+cor(NBA$DBPM, NBA$WingspandivHt, use="complete")
+```
+
+The correlation for wingspan / height with DBPM is 0.22
+
+```{r echo=FALSE}
+g <- ggplot(rooks, aes(Ht, Wingspan)) +
+  geom_jitter(aes(stat = Name), size = 1.25, shape = 1, color = "#4682B4") +
+  geom_smooth(method = lm, size = .5, se = FALSE, color = "#ff8000")
+
+ggplotly(g)
+```
+
+Let's look at the most-outsized wingspans (greater than +7) in more detail.
+
+```{r echo=FALSE}
+ggplot(rooks, aes(Ht, Wingspan, label = Name)) +
+  geom_point(size = 1, color = "black") +
+  geom_smooth(method = lm, size = 0.5, se = FALSE) +
+  geom_label_repel(data = subset(rooks, WingspanminHt > 7))
+```
+
+At first glance, this could be a random sample of NBA players, but some of the NBA's best defenders are in this group: two-time reigning defensive player of the year in (swing) Kawhi Leonard as well as very adept rim-protecting bigs in Rudy Gobert, Anthony Davis, Bickmack Biyombo, Larry Sanders, and David West. Is there a pattern here?
+
+```{r echo=FALSE}
+logDRB <- log(NBA$DRB)
+ggplot(NBA, aes(logDRB, DBPM)) +
+  geom_point() +
+  geom_smooth()
+
+cor(NBA$DBPM, logDRB, use="complete")
+
+logPF <- log(NBA$PF)
+ggplot(NBA, aes(logPF, DBPM)) +
+  geom_point() +
+  geom_smooth()
+
+cor(NBA$DBPM, NBA$STL, use="complete")
+
+ggplot(NBA, aes(STL, DBPM)) +
+  geom_point() +
+  geom_smooth()
+
+cor(NBA$DBPM, NBA$STL, use="complete")
+
+sqrtBLK <- sqrt(NBA$BLK)
+ggplot(NBA, aes(sqrtBLK, DBPM)) +
+  geom_point() +
+  geom_smooth()
+
+cor(NBA$DBPM, sqrtBLK, use ="complete")
+```
+
+The relationships between the variables (keeping the log transformations of fouls and defensive rebounds while taking the square root of blocks) with DBPM provide results that are roughly linear.
+
+# Bivariate Analysis
+
+### Talk about some of the relationships you observed in this part of the investigation. How did the feature(s) of interest vary with other features in the dataset?
+
+Height predictably varies linearly with wingspan. DBPM varies linearly with height and wingspan.
+
+### Did you observe any interesting relationships between the other features (not the main feature(s) of interest)?
+
+The difference between height and wingspan also varied linearly, albeit slightly, with DBPM. This is now a main feature of interest. 
+
+### What was the strongest relationship you found?
+
+Blocks, defensive rebounding, and wingspan most strongly correlated with DBPM.
+
+# Multivariate Plots Section
+
+```{r echo=FALSE, Multivariate_Plots}
+ggplot(NBA, aes(Wingspan, DBPM, color = Position)) +
+  geom_point(size = 2) +
+  scale_colour_brewer(palette = "Blues", labels=c("Bigs", "Swings", "Wings",
+                                                  "Guards"), 
+                      limit = positions, direction = -1) +
+  theme_dark()
+```
+
+Again, we see the relationship between wingspan and DBPM isn't very different among positions. There is more variance in the smallest and largest positions, as well as more data.
+
+```{r echo=FALSE}
+f <- ggplot(NBA, aes(Ht, Wingspan, color = DBPM)) +
+  geom_jitter(aes(stat = Name), size = 1, shape = 1) +
+  scale_color_gradient2(low = "red", high = "green", mid = "orange", 
+                        midpoint = 1) +
+  geom_smooth(method = lm, size = 0.5, color = "black", se = FALSE) +
+  theme_bw()
+ggplotly(f)
+```
+
+Jitter was added to this plot in order to reduce overplotting and make it easier to navigate through names. This graph indicates that wingspan to height ratio might be useful to include in a linear model. Let's test a few, beginning with the ordinary rate stats and seeing how the additions of wingspan and height factor affect r-squared.
+
+```{r echo=FALSE}
+lm0 <- lm(DBPM ~ STL + sqrtBLK + logDRB + logPF, data = NBA)
+lm1 <- lm(DBPM ~ Ht + STL + sqrtBLK + logDRB + logPF, data = NBA)
+lm2 <- lm(DBPM ~ Wingspan + STL + sqrtBLK + logDRB + logPF, data = NBA)
+lm3 <- lm(DBPM ~ WingspanminHt + STL + sqrtBLK + logDRB + logPF, data = NBA)
+lm4 <- lm(DBPM ~ WingspandivHt + STL + sqrtBLK + logDRB + logPF, data = NBA)
+lm5 <- lm(DBPM ~ WingspandivHt + Wingspan + STL + sqrtBLK + logDRB + logPF,
+          data = NBA)
+
+mtable0 <- mtable("Model 1"=lm0,"Model 2"=lm1,"Model 3"=lm2,
+                      "Model 4" = lm3, "Model 5" = lm4,
+                    "Model 6" = lm5, sdigits = 3,
+    summary.stats=c("sigma","R-squared","F","p","N"))
+
+mtable0
+```
+
+Whereas the addition of height doesn't add anything to the ordinary rate stats when it comes to predicting DBPM, we see the three wingpsan stats bump up the r-squared value to 0.697. My basketball intuition led me to construct Model 5, in which I included the wingspan and wingspan to height ratio, but this produced no change in r-squared.
+
+# Multivariate Analysis
+
+### Talk about some of the relationships you observed in this part of the investigation. Were there features that strengthened each other in terms of looking at your feature(s) of interest?
+
+There was a lot more variance in wingspans for guards and bigs than for swings and wings. Generally speaking, DBPM tended to rise when one's wingspan to height ratio increased, although this is not a rule: There are strong defensive seasons with ho-hum player-wingspan's for their size like Joakim Noah and Andrew Bogut.
+
+### Were there any interesting or surprising interactions between features?
+
+I suspected having a long wingspan for one's position would be especially beneficial for DBPM, but my investigation showed that this wasn't the case. It was interesting to find that players with more outsized wingspans generally had higher DBPMs.
+
+### OPTIONAL: Did you create any models with your dataset? Discuss the strengths and limitations of your model.
+
+I tried out several models using a combination of defensive stats along with height and wingspan data to create a multiple linear regression model to predict DBPM. Whereas adding height to the ordinary rate stats produced virtually no change, including the various wingspan stats produced a better predictive model. However, there was no difference in r-squared between the wingspan data. Perhaps a different approach to collecting wingspan data than the one outlined in the introduction would produce a higher r-squared.
+
+------
+
+# Final Plots and Summary
+
+### Plot One
+```{r echo=FALSE, Plot_One}
+ggplot(NBA_raw, aes(Wingspan)) +
+  geom_histogram(binwidth = 0.5, color = 'black', fill = '#F79420') +
+  scale_x_continuous(limits = c(70, 94), breaks = seq(70, 94, 2)) +
+  labs(title = "NBA Wingspans", x = "Wingspan (in)") 
+```
+
+### Description One
+
+NBA wingspans follow a roughly normal distribution, with most wingspans falling between 76 and 88 inches, and a peak at around 83 inches.
+
+### Plot Two
+```{r echo=FALSE, fig.width=9}
+ggplot(NBA, aes(Wingspan, DBPM, color = Position)) +
+  geom_point(size = 2) +
+  scale_colour_brewer(palette = "Blues", labels=c("Bigs", "Swings", "Wings",
+                                                  "Guards"), 
+                      limit = positions, direction = -1) +
+  theme_dark() +
+  labs(title = "NBA Wingspans versus DBPM", x = "Wingspan (in)", y = "DBPM") 
+
+ggplot(NBA, aes(DBPM, color = Position)) +
+  geom_density(size = .75) +
+  scale_colour_brewer(palette = "Blues", limit = positions, direction = -1) +
+  theme_dark() +
+  labs(title = "DBPM Density Plot by Position", x = "DBPM") 
+```
+
+### Description Two
+
+DBPM varies linearly with height in total and across all positions. DBPM and wingspan increase as one moves up a position, and there is a larger variety of both DBPM and wingspans among guards and bigs than wings and swings.
+
+### Plot Three
+```{r echo=FALSE, fig.width=9}
+f <- ggplot(NBA, aes(Ht, Wingspan, color = DBPM)) +
+  geom_jitter(aes(stat = Name), size = 1, shape = 1) +
+  scale_color_gradient2(low = "red", high = "green", mid = "orange",
+                        midpoint = 1) +
+  geom_smooth(method = lm, size = 0.5, color = "black", se = FALSE) +
+  theme_bw() +
+  labs(title = "DBPM for Wingspan and Height Data", x = "Height (in)",
+       y = "Wingspan (in)") 
+ggplotly(f)
+```
+
+### Description Three
+
+Jitter was added to this plot in order to reduce overplotting and make it easier to navigate through names. Here we see that there are more greens and yellows above the trendline and more reds and oranges below. However, there is a less noticeable shift in colors while moving solely left to right. This indicates that the relationship between wingspan and height plays a role in DBPM.
+
+------
+
+# Reflection
+
+The basketball dataset I compiled contains 17 variables with 8185 observations. I began my investigation by looking at univariate data to get a feel for the distribution of defensive metrics, heights, wingspans, and Defensive Box Plus/Minus. I explored the relationship between these variables using summary statistics and plots and based off my observations, created new variables like wingspan-height difference and ratio, and tranformed some key metrics. Eventually, my investigation led me to create a series of linear models which I could compare to determine if wingspan could be used to be predict a player's defensive contribution.
+
+While defensive box-score metrics can get one a long way toward approximating a player's defensive ability, adding variables like wingspan, height, and the wingspan to height ratio produces a small, but noticeable jump in explaining variance in DBPM. This indicates that wingspan is an important factor in estimating a player's defensive ability and potential while not being crucial. A player with a mediocre wingspan for their height can still be an elite defender (as is the case with Joakim Noah and Andrew Bogut), but player's with short wingspans for their height rarely are impactful. Having an "outsized" wingspan is undoubtedly helpful on defense, likely because one can move like a quicker player while having the length of a larger one. While see that many of these players are among the NBA's best, there are still poor defenders with outsized wingspans. Attributes like lateral quickness, strength, tenacity, and focus are still central to any defensive projection.
+
+A limitation of this investigation is related to the reliability of DBPM as a measure of defensive contribution. Defensive impact is notoriously hard to measure through box scores, and it would have been helpful to compare the central variables to alternative metrics like Real Plus-Minus and RAPM, but Real Plus-Minus only has three years worth of data and I only found RAPM data which aggregates all of a player's seasons. Secondly, there was the reliability of wingspan data, for which uniformity is an impossible goal given that players often are still growing around the time when measurements are conducted. In addition, different organizations conduct the measurements. After some deliberation, I took the highest recorded measurement. Finally, this data is truncated because A) player data begins with the 2003 draft and therefore is skewed toward younger players, and B) players who are poor defenders may be excluded from the data since they did not play enough or are out of the league. Nevertheless, I was pleasantly surprised by the high r-squared value given how difficult it is to approximate defensive impact.
+
+All in all, wingspan is an important part of defense, and given that it is helpful in measuring defensive contribution in a given season, it should be used in prospect projections as well, albeit not at the expense of other defensive attributes. In addition, exploring how age affects DBPM might give a better insight into the importance of wingspan in the NBA over the course of a NBA career.
+
+### Acknowledgements
+Extensively used RStudio Cheatsheets.
+Data scraped from RealGM, Basketball Reference, and DraftExpress
